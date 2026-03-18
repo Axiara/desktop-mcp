@@ -4,21 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import io
+import concurrent.futures
 
 from PIL import Image
 
 from .models import OcrLine, Rect
 
+# Reusable thread pool so we don't create/destroy one per OCR call.
+_ocr_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-async def _recognize_async(image: Image.Image, language: str = "en") -> list[OcrLine]:
-    """Run Windows OCR on a PIL Image."""
+
+def _recognize_sync(image: Image.Image, language: str = "en") -> list[OcrLine]:
+    """Run Windows OCR synchronously in a dedicated thread.
+
+    winocr is async-only, so we spin up a fresh event loop in a
+    worker thread.  This keeps the MCP server's own event loop free.
+    """
     import winocr
 
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    png_bytes = buf.getvalue()
+    async def _inner():
+        return await winocr.recognize_pil(image, lang=language)
 
-    result = await winocr.recognize_pil(image, lang=language)
+    result = asyncio.run(_inner())
 
     lines = []
     for line in result.lines:
@@ -46,18 +53,10 @@ def read_image_text(image: Image.Image, language: str = "en") -> list[OcrLine]:
     Returns:
         List of OcrLine with text and bounding boxes.
     """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _recognize_async(image, language))
-            return future.result()
-    else:
-        return asyncio.run(_recognize_async(image, language))
+    # Always run in the thread pool — safe whether or not an event
+    # loop is active on the calling thread.
+    future = _ocr_pool.submit(_recognize_sync, image, language)
+    return future.result(timeout=30)
 
 
 def read_screen_region_text(

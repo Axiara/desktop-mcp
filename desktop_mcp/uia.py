@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from ctypes import wintypes
 from typing import Any
 
-import comtypes
-import comtypes.client
-from comtypes import GUID
-
 from .models import ElementNode, ElementInfo, Rect, WindowInfo
-
-# ── COM Interface IDs ─────────────────────────────────────────────────────
-CLSID_CUIAutomation = GUID("{FF48DBA4-60EF-4201-AA87-54103EEF594E}")
-IID_IUIAutomation = GUID("{30CBE57D-D9D0-452A-AB13-7AC5AC4825EE}")
 
 # ── UIA Control Type IDs → friendly names ─────────────────────────────────
 _CONTROL_TYPES: dict[int, str] = {
@@ -80,6 +73,16 @@ _PATTERN_IDS: dict[int, str] = {
     10016: "Transform",
     10017: "ScrollItem",
     10018: "LegacyIAccessible",
+}
+
+# Subset of patterns worth probing per element (the common interactive ones).
+# Checking all 19 patterns on every element is slow; limit to actionable ones.
+_PROBE_PATTERN_IDS: dict[int, str] = {
+    10000: "Invoke",
+    10002: "Value",
+    10005: "ExpandCollapse",
+    10010: "SelectionItem",
+    10015: "Toggle",
 }
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────
@@ -229,26 +232,72 @@ def focus_window(hwnd: int) -> bool:
 # ── UI Automation ─────────────────────────────────────────────────────────
 
 _uia: Any = None
+_uia_initialized: bool = False
+_UIAutomationClient: Any = None  # cached module reference
+
+
+def _log(msg: str) -> None:
+    """Log to stderr (never stdout — that's the MCP transport)."""
+    print(f"[desktop-mcp] {msg}", file=sys.stderr, flush=True)
+
+
+def initialize() -> None:
+    """Eagerly initialize COM and generate UIA type library wrappers.
+
+    MUST be called once on the main thread before the async event loop
+    starts. This prevents comtypes from trying to generate wrappers
+    lazily during a tool call (which hangs).
+    """
+    global _uia, _uia_initialized, _UIAutomationClient
+
+    if _uia_initialized:
+        return
+
+    import comtypes
+    import comtypes.client
+    from comtypes import GUID
+
+    _log("Initializing COM...")
+    comtypes.CoInitialize()
+
+    _log("Generating UIAutomation type library wrappers...")
+    try:
+        from comtypes.gen import UIAutomationClient
+    except ImportError:
+        comtypes.client.GetModule("UIAutomationCore.dll")
+        from comtypes.gen import UIAutomationClient
+
+    _UIAutomationClient = UIAutomationClient
+
+    _log("Creating IUIAutomation instance...")
+    CLSID_CUIAutomation = GUID("{FF48DBA4-60EF-4201-AA87-54103EEF594E}")
+    _uia = comtypes.CoCreateInstance(
+        CLSID_CUIAutomation,
+        interface=UIAutomationClient.IUIAutomation,
+        clsctx=comtypes.CLSCTX_INPROC_SERVER,
+    )
+
+    _uia_initialized = True
+    _log("UIA ready.")
 
 
 def _get_uia():
-    """Lazy-initialize the IUIAutomation COM object."""
-    global _uia
-    if _uia is None:
-        _uia = comtypes.CoCreateInstance(
-            CLSID_CUIAutomation,
-            interface=comtypes.gen.UIAutomationClient.IUIAutomation,
-            clsctx=comtypes.CLSCTX_INPROC_SERVER,
-        )
+    """Return the IUIAutomation COM singleton.
+
+    Raises RuntimeError if initialize() hasn't been called.
+    """
+    if not _uia_initialized:
+        # Fallback: initialize now (slower, but avoids hard crash)
+        _log("WARNING: UIA not pre-initialized, initializing lazily...")
+        initialize()
     return _uia
 
 
-def _ensure_uia_generated():
-    """Ensure the UIAutomationClient type library is generated."""
-    try:
-        from comtypes.gen import UIAutomationClient  # noqa: F401
-    except ImportError:
-        comtypes.client.GetModule("UIAutomationCore.dll")
+def _get_uia_module():
+    """Return the generated UIAutomationClient module."""
+    if _UIAutomationClient is None:
+        initialize()
+    return _UIAutomationClient
 
 
 def _element_to_node(element: Any, walker: Any, max_depth: int, current_depth: int = 0) -> ElementNode:
@@ -288,20 +337,18 @@ def _element_to_node(element: Any, walker: Any, max_depth: int, current_depth: i
     except Exception:
         is_enabled = True
 
-    # Get value if available
+    # Only probe the small subset of interactive patterns
     value = None
     patterns: list[str] = []
-    uia = _get_uia()
-    for pattern_id, pattern_name in _PATTERN_IDS.items():
+    for pattern_id, pattern_name in _PROBE_PATTERN_IDS.items():
         try:
             pat = element.GetCurrentPattern(pattern_id)
             if pat is not None:
                 patterns.append(pattern_name)
                 if pattern_name == "Value" and value is None:
                     try:
-                        val_pat = pat.QueryInterface(
-                            comtypes.gen.UIAutomationClient.IUIAutomationValuePattern
-                        )
+                        uia_mod = _get_uia_module()
+                        val_pat = pat.QueryInterface(uia_mod.IUIAutomationValuePattern)
                         value = val_pat.CurrentValue
                     except Exception:
                         pass
@@ -343,7 +390,6 @@ def get_window_tree(hwnd: int, max_depth: int = 3) -> ElementNode:
     Returns:
         The element tree as nested ElementNode objects.
     """
-    _ensure_uia_generated()
     uia = _get_uia()
     element = uia.ElementFromHandle(hwnd)
     walker = uia.ControlViewWalker
@@ -355,8 +401,8 @@ def get_element_info(hwnd: int, automation_id: str | None = None, name: str | No
 
     Searches by automation_id or name within the given window.
     """
-    _ensure_uia_generated()
     uia = _get_uia()
+    uia_mod = _get_uia_module()
     root = uia.ElementFromHandle(hwnd)
 
     condition = None
@@ -390,8 +436,7 @@ def get_element_info(hwnd: int, automation_id: str | None = None, name: str | No
     try:
         val_pat = found.GetCurrentPattern(10002)  # Value pattern
         if val_pat is not None:
-            from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
-            vp = val_pat.QueryInterface(IUIAutomationValuePattern)
+            vp = val_pat.QueryInterface(uia_mod.IUIAutomationValuePattern)
             value = vp.CurrentValue
     except Exception:
         pass
@@ -417,7 +462,6 @@ def find_elements(
     automation_id: str | None = None,
 ) -> list[ElementInfo]:
     """Search for UI elements matching the given criteria."""
-    _ensure_uia_generated()
     uia = _get_uia()
     root = uia.ElementFromHandle(hwnd)
 
@@ -471,8 +515,8 @@ def find_elements(
 
 def invoke_element(hwnd: int, automation_id: str | None = None, name: str | None = None) -> bool:
     """Invoke a UI element's default action (click button, toggle checkbox, etc.)."""
-    _ensure_uia_generated()
     uia = _get_uia()
+    uia_mod = _get_uia_module()
     root = uia.ElementFromHandle(hwnd)
 
     condition = None
@@ -490,8 +534,7 @@ def invoke_element(hwnd: int, automation_id: str | None = None, name: str | None
     try:
         pat = found.GetCurrentPattern(10000)  # Invoke
         if pat is not None:
-            from comtypes.gen.UIAutomationClient import IUIAutomationInvokePattern
-            invoke_pat = pat.QueryInterface(IUIAutomationInvokePattern)
+            invoke_pat = pat.QueryInterface(uia_mod.IUIAutomationInvokePattern)
             invoke_pat.Invoke()
             return True
     except Exception:
@@ -500,8 +543,7 @@ def invoke_element(hwnd: int, automation_id: str | None = None, name: str | None
     try:
         pat = found.GetCurrentPattern(10015)  # Toggle
         if pat is not None:
-            from comtypes.gen.UIAutomationClient import IUIAutomationTogglePattern
-            toggle_pat = pat.QueryInterface(IUIAutomationTogglePattern)
+            toggle_pat = pat.QueryInterface(uia_mod.IUIAutomationTogglePattern)
             toggle_pat.Toggle()
             return True
     except Exception:

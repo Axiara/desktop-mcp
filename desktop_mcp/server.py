@@ -764,6 +764,19 @@ def _compact_tree(node: dict) -> dict:
 
 def main_stdio():
     """Entry point for the desktop-mcp-server console script."""
+    import sys
+
+    # Pre-initialize COM + UIA type library on the main thread BEFORE
+    # the async event loop starts.  This prevents comtypes from lazily
+    # generating wrappers inside an async context (which hangs).
+    try:
+        from .uia import initialize
+        initialize()
+    except Exception as exc:
+        print(f"[desktop-mcp] UIA init failed: {exc}", file=sys.stderr, flush=True)
+        # Continue anyway — window enumeration & capture still work
+        # without UIA; only tree/element tools will fail.
+
     mcp.run(transport="stdio")
 
 
