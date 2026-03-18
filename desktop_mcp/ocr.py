@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import concurrent.futures
 
 from PIL import Image
@@ -29,14 +28,34 @@ def _recognize_sync(image: Image.Image, language: str = "en") -> list[OcrLine]:
 
     lines = []
     for line in result.lines:
+        # OcrLine only has .text and .words — bounding boxes live on
+        # OcrWord.bounding_rect.  Compute line bbox from word union.
+        if not line.words:
+            lines.append(OcrLine(
+                text=line.text,
+                bounding_box=Rect(x=0, y=0, width=0, height=0),
+            ))
+            continue
+
+        min_x = float("inf")
+        min_y = float("inf")
+        max_x = 0.0
+        max_y = 0.0
+        for word in line.words:
+            br = word.bounding_rect
+            min_x = min(min_x, br.x)
+            min_y = min(min_y, br.y)
+            max_x = max(max_x, br.x + br.width)
+            max_y = max(max_y, br.y + br.height)
+
         lines.append(
             OcrLine(
                 text=line.text,
                 bounding_box=Rect(
-                    x=int(line.x),
-                    y=int(line.y),
-                    width=int(line.width),
-                    height=int(line.height),
+                    x=int(min_x),
+                    y=int(min_y),
+                    width=int(max_x - min_x),
+                    height=int(max_y - min_y),
                 ),
             )
         )
@@ -53,8 +72,6 @@ def read_image_text(image: Image.Image, language: str = "en") -> list[OcrLine]:
     Returns:
         List of OcrLine with text and bounding boxes.
     """
-    # Always run in the thread pool — safe whether or not an event
-    # loop is active on the calling thread.
     future = _ocr_pool.submit(_recognize_sync, image, language)
     return future.result(timeout=30)
 

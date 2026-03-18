@@ -9,8 +9,12 @@ from . import safety
 # Disable pyautogui's failsafe (moving mouse to corner aborts) since
 # this is intentional automation controlled by an AI agent.
 pyautogui.FAILSAFE = False
-# Set a short default pause between pyautogui actions
-pyautogui.PAUSE = 0.02
+# Minimal pause between pyautogui actions
+pyautogui.PAUSE = 0.01
+
+# Text longer than this threshold is pasted via clipboard instead of
+# typed character-by-character, which is dramatically faster.
+_PASTE_THRESHOLD = 32
 
 
 def click(
@@ -19,62 +23,59 @@ def click(
     button: str = "left",
     clicks: int = 1,
 ) -> None:
-    """Click at screen coordinates.
-
-    Args:
-        x: X coordinate.
-        y: Y coordinate.
-        button: "left", "right", or "middle".
-        clicks: Number of clicks (1=single, 2=double, 3=triple).
-    """
+    """Click at screen coordinates."""
     safety.pre_action("click", {"x": x, "y": y, "button": button, "clicks": clicks})
     pyautogui.click(x=x, y=y, button=button, clicks=clicks)
 
 
-def type_text(text: str, interval: float = 0.02) -> None:
-    """Type a text string character by character.
+def type_text(text: str, interval: float = 0.01, use_clipboard: bool | None = None) -> None:
+    """Type a text string.
+
+    For short ASCII text, types character-by-character.
+    For long text or text with non-ASCII characters, pastes via clipboard
+    (much faster — 615 chars in ~50ms vs ~12 seconds).
 
     Args:
         text: The text to type.
-        interval: Seconds between each character.
+        interval: Seconds between each character (only used for short text).
+        use_clipboard: Force clipboard paste (True) or char-by-char (False).
+                       None = auto-decide based on length and content.
     """
-    safety.pre_action("type_text", {"text": text[:100], "interval": interval})
-    pyautogui.typewrite(text, interval=interval) if all(ord(c) < 128 for c in text) else _type_unicode(text, interval)
+    safety.pre_action("type_text", {"length": len(text), "preview": text[:80]})
+
+    should_paste = use_clipboard
+    if should_paste is None:
+        has_unicode = any(ord(c) > 127 for c in text)
+        has_newlines = "\n" in text
+        should_paste = has_unicode or has_newlines or len(text) > _PASTE_THRESHOLD
+
+    if should_paste:
+        _paste_text(text)
+    else:
+        pyautogui.typewrite(text, interval=interval)
 
 
-def _type_unicode(text: str, interval: float) -> None:
-    """Type unicode text using pyperclip + paste, falling back to write()."""
-    import time
-    for char in text:
-        if ord(char) < 128:
-            pyautogui.press(char) if len(char) == 1 else pyautogui.typewrite(char)
-        else:
-            # For non-ASCII, use the clipboard
-            import pyperclip
-            pyperclip.copy(char)
-            pyautogui.hotkey("ctrl", "v")
-        time.sleep(interval)
+def _paste_text(text: str) -> None:
+    """Paste text via clipboard — fast path for long/unicode text."""
+    import win32clipboard
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+    pyautogui.hotkey("ctrl", "v")
 
 
 def press_keys(*keys: str) -> None:
-    """Press a key combination.
-
-    Args:
-        keys: Key names (e.g., "ctrl", "s"). Pressed as a hotkey combination.
-    """
+    """Press a key combination."""
     safety.pre_action("press_keys", {"keys": list(keys)})
     pyautogui.hotkey(*keys)
 
 
-def mouse_move(x: int, y: int, duration: float = 0.1) -> None:
-    """Move mouse to coordinates.
-
-    Args:
-        x: Target X coordinate.
-        y: Target Y coordinate.
-        duration: Seconds for the movement animation.
-    """
-    safety.pre_action("mouse_move", {"x": x, "y": y, "duration": duration})
+def mouse_move(x: int, y: int, duration: float = 0.05) -> None:
+    """Move mouse to coordinates."""
+    safety.pre_action("mouse_move", {"x": x, "y": y})
     pyautogui.moveTo(x=x, y=y, duration=duration)
 
 
@@ -84,21 +85,12 @@ def mouse_drag(
     end_x: int,
     end_y: int,
     button: str = "left",
-    duration: float = 0.3,
+    duration: float = 0.2,
 ) -> None:
-    """Drag from one point to another.
-
-    Args:
-        start_x: Starting X.
-        start_y: Starting Y.
-        end_x: Ending X.
-        end_y: Ending Y.
-        button: Mouse button to hold.
-        duration: Seconds for the drag.
-    """
+    """Drag from one point to another."""
     safety.pre_action("mouse_drag", {
         "start": [start_x, start_y], "end": [end_x, end_y],
-        "button": button, "duration": duration,
+        "button": button,
     })
     pyautogui.moveTo(start_x, start_y)
     pyautogui.drag(
@@ -108,13 +100,7 @@ def mouse_drag(
 
 
 def scroll(amount: int, x: int | None = None, y: int | None = None) -> None:
-    """Scroll the mouse wheel.
-
-    Args:
-        amount: Positive = scroll up, negative = scroll down.
-        x: X coordinate to scroll at (None = current position).
-        y: Y coordinate to scroll at (None = current position).
-    """
+    """Scroll the mouse wheel."""
     safety.pre_action("scroll", {"amount": amount, "x": x, "y": y})
     pyautogui.scroll(amount, x=x, y=y)
 

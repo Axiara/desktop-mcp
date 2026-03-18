@@ -14,7 +14,8 @@ _paused = False
 _lock = threading.Lock()
 _action_log: deque[ActionRecord] = deque(maxlen=1000)
 
-ACTION_DELAY_MS = int(os.environ.get("DESKTOP_MCP_ACTION_DELAY_MS", "50"))
+# Default 10ms — just enough to be observable, not enough to feel sluggish.
+ACTION_DELAY_MS = int(os.environ.get("DESKTOP_MCP_ACTION_DELAY_MS", "10"))
 
 
 class AutomationPausedError(Exception):
