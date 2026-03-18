@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "desktop-mcp"
+version = "0.1.0"
+description = "Windows desktop automation MCP server for AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "pyautogui>=0.9.54",
+    "Pillow>=10.0",
+    "mss>=9.0",
+    "pywin32>=306",
+    "comtypes>=1.4",
+    "winocr>=0.0.10",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+desktop-mcp-server = "desktop_mcp.server:main_stdio"
+
+[tool.setuptools.packages.find]
+include = ["desktop_mcp*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "slow: live desktop integration tests",
+]
